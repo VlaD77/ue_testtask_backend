@@ -1,0 +1,223 @@
+openapi: 3.0.3
+info:
+  title: Encounter Progress Backend
+  version: 1.0.0
+  description: Backend API for co-op encounter completion, region streaming state, and party player poses.
+servers:
+  - url: http://127.0.0.1:8080
+paths:
+  /health:
+    get:
+      summary: Health check
+      responses:
+        "200":
+          description: Service status
+  /worlds/{worldId}/seed:
+    get:
+      summary: Get deterministic world generation seed
+      parameters:
+        - $ref: "#/components/parameters/worldId"
+      responses:
+        "200":
+          description: World seed used by the demo map and runtime region generation
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorldSeed"
+  /worlds/{worldId}/regions/{regionId}/stream-state:
+    get:
+      summary: Get current stream state for a region
+      parameters:
+        - $ref: "#/components/parameters/worldId"
+        - $ref: "#/components/parameters/regionId"
+      responses:
+        "200":
+          description: Region stream state
+    post:
+      summary: Update current stream state for a region
+      parameters:
+        - $ref: "#/components/parameters/worldId"
+        - $ref: "#/components/parameters/regionId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RegionStreamStateUpdate"
+      responses:
+        "200":
+          description: Updated stream state
+  /worlds/{worldId}/parties/{partyId}/players:
+    get:
+      summary: Get fresh player poses for a party
+      parameters:
+        - $ref: "#/components/parameters/worldId"
+        - $ref: "#/components/parameters/partyId"
+      responses:
+        "200":
+          description: Active party player poses
+  /worlds/{worldId}/parties/{partyId}/players/{playerId}/pose:
+    post:
+      summary: Update a player's party pose
+      parameters:
+        - $ref: "#/components/parameters/worldId"
+        - $ref: "#/components/parameters/partyId"
+        - $ref: "#/components/parameters/playerId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PlayerPoseUpdate"
+      responses:
+        "200":
+          description: Pose accepted
+  /worlds/{worldId}/regions/{regionId}/parties/{partyId}/players/{playerId}/encounters/completed:
+    get:
+      summary: Get completed encounters for a scoped player/party
+      parameters:
+        - $ref: "#/components/parameters/worldId"
+        - $ref: "#/components/parameters/regionId"
+        - $ref: "#/components/parameters/partyId"
+        - $ref: "#/components/parameters/playerId"
+      responses:
+        "200":
+          description: Completed encounter list
+    delete:
+      summary: Clear completed encounters for a scoped player/party
+      parameters:
+        - $ref: "#/components/parameters/worldId"
+        - $ref: "#/components/parameters/regionId"
+        - $ref: "#/components/parameters/partyId"
+        - $ref: "#/components/parameters/playerId"
+      responses:
+        "200":
+          description: Cleared progress
+  /worlds/{worldId}/regions/{regionId}/parties/{partyId}/players/{playerId}/encounters/{encounterId}/completed:
+    post:
+      summary: Mark an encounter completed
+      parameters:
+        - $ref: "#/components/parameters/worldId"
+        - $ref: "#/components/parameters/regionId"
+        - $ref: "#/components/parameters/partyId"
+        - $ref: "#/components/parameters/playerId"
+        - $ref: "#/components/parameters/encounterId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EncounterCompletion"
+      responses:
+        "200":
+          description: Completion accepted
+components:
+  parameters:
+    worldId:
+      name: worldId
+      in: path
+      required: true
+      schema:
+        type: string
+    regionId:
+      name: regionId
+      in: path
+      required: true
+      schema:
+        type: string
+    partyId:
+      name: partyId
+      in: path
+      required: true
+      schema:
+        type: string
+    playerId:
+      name: playerId
+      in: path
+      required: true
+      schema:
+        type: string
+    encounterId:
+      name: encounterId
+      in: path
+      required: true
+      schema:
+        type: string
+  schemas:
+    WorldSeed:
+      type: object
+      properties:
+        worldId:
+          type: string
+        seed:
+          type: integer
+          example: 421337
+        config:
+          $ref: "#/components/schemas/WorldConfig"
+    WorldConfig:
+      type: object
+      properties:
+        tileSize:
+          type: number
+          example: 3900
+        gridColumns:
+          type: integer
+          example: 10
+        gridRows:
+          type: integer
+          example: 8
+        worldWidth:
+          type: number
+          example: 39000
+        worldHeight:
+          type: number
+          example: 31200
+    EncounterCompletion:
+      type: object
+      properties:
+        reward:
+          type: object
+          properties:
+            rewardId:
+              type: string
+            amount:
+              type: integer
+        source:
+          type: string
+          example: ue-client
+    RegionStreamStateUpdate:
+      type: object
+      properties:
+        loaded:
+          type: boolean
+        nearbyPlayerCount:
+          type: integer
+        partyId:
+          type: string
+        playerId:
+          type: string
+        source:
+          type: string
+          example: ue-server
+    PlayerPoseUpdate:
+      type: object
+      required:
+        - x
+        - y
+        - z
+        - yaw
+      properties:
+        x:
+          type: number
+        y:
+          type: number
+        z:
+          type: number
+        yaw:
+          type: number
+        provider:
+          type: string
+          example: LocalRest
+        source:
+          type: string
+          example: ue-client
