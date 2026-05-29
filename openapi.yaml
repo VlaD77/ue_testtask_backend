@@ -2,9 +2,12 @@ openapi: 3.0.3
 info:
   title: Encounter Progress Backend
   version: 1.0.0
-  description: Backend API for co-op encounter completion, region streaming state, and party player poses.
+  description: Shared API exposed by both backend implementations: Node REST and Nakama/PostgreSQL.
 servers:
   - url: http://127.0.0.1:8080
+    description: Node REST backend
+  - url: http://127.0.0.1:8081
+    description: Nakama backend HTTP port
 paths:
   /health:
     get:
@@ -56,6 +59,20 @@ paths:
       responses:
         "200":
           description: Active party player poses
+  /worlds/{worldId}/parties/{partyId}/runtime-state:
+    get:
+      summary: Get party runtime generation state
+      description: Returns the current transient generation seed used for party-local mobs and chests. If the party was occupied and is now empty, the backend advances this generation and resets transient region stream state.
+      parameters:
+        - $ref: "#/components/parameters/worldId"
+        - $ref: "#/components/parameters/partyId"
+      responses:
+        "200":
+          description: Party runtime state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PartyRuntimeState"
   /worlds/{worldId}/parties/{partyId}/players/{playerId}/pose:
     post:
       summary: Update a player's party pose
@@ -221,3 +238,43 @@ components:
         source:
           type: string
           example: ue-client
+    PartyRuntimeState:
+      type: object
+      properties:
+        worldId:
+          type: string
+        partyId:
+          type: string
+        generation:
+          type: integer
+          example: 2
+        runtimeSeed:
+          type: integer
+          format: int64
+          example: 3807520931
+        activePlayerCount:
+          type: integer
+          example: 0
+        wasOccupied:
+          type: boolean
+        emptySince:
+          type: string
+          nullable: true
+        lastActiveAt:
+          type: string
+          nullable: true
+        lastResetAt:
+          type: string
+          nullable: true
+        resetReason:
+          type: string
+          example: party-empty
+        transientState:
+          type: object
+          properties:
+            mobs:
+              type: string
+              example: regenerated-from-seed
+            chests:
+              type: string
+              example: regenerated-from-seed

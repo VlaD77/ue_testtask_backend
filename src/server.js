@@ -13,6 +13,10 @@ const WORLD_SEED = Number(process.env.WORLD_SEED || 421337);
 const WORLD_TILE_SIZE = Number(process.env.WORLD_TILE_SIZE || 3900);
 const WORLD_GRID_COLUMNS = Number(process.env.WORLD_GRID_COLUMNS || 10);
 const WORLD_GRID_ROWS = Number(process.env.WORLD_GRID_ROWS || 8);
+const PARTY_EMPTY_REGENERATION_ENABLED = process.env.PARTY_EMPTY_REGENERATION_ENABLED !== 'false';
+const BACKEND_KIND = 'node-rest';
+const STORAGE_OWNER = 'local-json';
+const SOURCE_NODE_HTTP = 'node-http';
 const WORLD_CONFIG = {
   tileSize: WORLD_TILE_SIZE,
   gridColumns: WORLD_GRID_COLUMNS,
@@ -26,15 +30,29 @@ async function ensureStore() {
   await fs.mkdir(path.dirname(DATA_FILE), { recursive: true });
   try {
     const raw = await fs.readFile(DATA_FILE, 'utf8');
-    return JSON.parse(raw);
+    return normalizeStore(JSON.parse(raw));
   } catch (error) {
     if (error.code !== 'ENOENT') {
       throw error;
     }
-    const empty = { players: {}, scopes: {}, regionStreamStates: {}, playerPoses: {}, worldSeeds: { 'demo-world': WORLD_SEED } };
+    const empty = normalizeStore({});
     await fs.writeFile(DATA_FILE, JSON.stringify(empty, null, 2));
     return empty;
   }
+}
+
+function normalizeStore(store) {
+  return {
+    players: store.players || {},
+    scopes: store.scopes || {},
+    regionStreamStates: store.regionStreamStates || {},
+    playerPoses: store.playerPoses || {},
+    partyRuntimeStates: store.partyRuntimeStates || {},
+    worldSeeds: {
+      'demo-world': WORLD_SEED,
+      ...(store.worldSeeds || {})
+    }
+  };
 }
 
 async function saveStore(store) {
@@ -62,7 +80,7 @@ function sendJson(response, statusCode, payload) {
     'cache-control': 'no-store',
     'access-control-allow-origin': '*',
     'access-control-allow-methods': 'GET,POST,DELETE,OPTIONS',
-    'access-control-allow-headers': 'content-type'
+    'access-control-allow-headers': 'content-type,authorization'
   });
   response.end(body);
 }
@@ -129,6 +147,19 @@ function getScopedProgress(store, scope, playerId) {
   return { scopeKey, scopedWorld, party, player: party.players[playerId] };
 }
 
+function scopedProgressResponse(scoped, scope, playerId) {
+  return {
+    scope,
+    ...scope,
+    playerId,
+    partyCompletedEncounterIds: scoped.party.completedEncounterIds,
+    playerCompletedEncounterIds: scoped.player.completedEncounterIds,
+    completions: scoped.party.completions,
+    backend: BACKEND_KIND,
+    storageOwner: STORAGE_OWNER
+  };
+}
+
 function completeScopedEncounter(store, scope, playerId, encounterId, body) {
   const now = new Date().toISOString();
   const scoped = getScopedProgress(store, scope, playerId);
@@ -147,10 +178,21 @@ function completeScopedEncounter(store, scope, playerId, encounterId, body) {
     encounterId,
     completedAt: now,
     reward: body.reward || null,
-    source: body.source || 'ue-client'
+    source: body.source || SOURCE_NODE_HTTP,
+    backend: BACKEND_KIND,
+    storageOwner: STORAGE_OWNER
   };
 
   return scoped;
+}
+
+function assertRequired(fields) {
+  const missing = Object.entries(fields)
+    .filter(([, value]) => value === undefined || value === null || String(value).trim() === '')
+    .map(([key]) => key);
+  if (missing.length > 0) {
+    throw Object.assign(new Error(`${missing.join(', ')} required`), { statusCode: 400 });
+  }
 }
 
 function getRegionStreamKey(worldId, regionId) {
@@ -159,6 +201,113 @@ function getRegionStreamKey(worldId, regionId) {
 
 function getPartyPoseKey(worldId, partyId) {
   return `${worldId}:${partyId}`;
+}
+
+function getPartyRuntimeKey(worldId, partyId) {
+  return `${worldId}:${partyId}`;
+}
+
+function hashToSeed(input) {
+  let hash = 2166136261;
+  for (let index = 0; index < input.length; index += 1) {
+    hash ^= input.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return hash >>> 0;
+}
+
+function getWorldSeed(store, worldId) {
+  return Number((store.worldSeeds && store.worldSeeds[worldId]) || WORLD_SEED);
+}
+
+function makeRuntimeSeed(store, worldId, partyId, generation) {
+  return hashToSeed(`${getWorldSeed(store, worldId)}:${worldId}:${partyId}:${generation}`);
+}
+
+function defaultPartyRuntimeState(store, worldId, partyId) {
+  const generation = 1;
+  return {
+    worldId,
+    partyId,
+    generation,
+    runtimeSeed: makeRuntimeSeed(store, worldId, partyId, generation),
+    activePlayerCount: 0,
+    wasOccupied: false,
+    emptySince: null,
+    lastActiveAt: null,
+    lastResetAt: null,
+    resetReason: 'initial',
+    transientState: {
+      mobs: 'seeded',
+      chests: 'seeded'
+    },
+    backend: BACKEND_KIND,
+    storageOwner: STORAGE_OWNER
+  };
+}
+
+function getPartyRuntimeState(store, worldId, partyId) {
+  if (!store.partyRuntimeStates) {
+    store.partyRuntimeStates = {};
+  }
+  const runtimeKey = getPartyRuntimeKey(worldId, partyId);
+  if (!store.partyRuntimeStates[runtimeKey]) {
+    store.partyRuntimeStates[runtimeKey] = defaultPartyRuntimeState(store, worldId, partyId);
+  }
+  return store.partyRuntimeStates[runtimeKey];
+}
+
+function resetTransientRegionStatesForParty(store, worldId, partyId, runtimeState) {
+  if (!store.regionStreamStates) {
+    return;
+  }
+
+  for (const state of Object.values(store.regionStreamStates)) {
+    if (!state || state.worldId !== worldId) {
+      continue;
+    }
+    if (state.partyId && state.partyId !== partyId) {
+      continue;
+    }
+    state.loaded = false;
+    state.nearbyPlayerCount = 0;
+    state.resetAt = runtimeState.lastResetAt;
+    state.runtimeGeneration = runtimeState.generation;
+    state.runtimeSeed = runtimeState.runtimeSeed;
+  }
+}
+
+function refreshPartyRuntimeState(store, worldId, partyId, activePlayers) {
+  const runtimeState = getPartyRuntimeState(store, worldId, partyId);
+  const now = new Date().toISOString();
+  const activePlayerCount = activePlayers.length;
+
+  runtimeState.activePlayerCount = activePlayerCount;
+  runtimeState.backend = BACKEND_KIND;
+  runtimeState.storageOwner = STORAGE_OWNER;
+
+  if (activePlayerCount > 0) {
+    runtimeState.wasOccupied = true;
+    runtimeState.lastActiveAt = now;
+    runtimeState.emptySince = null;
+    return runtimeState;
+  }
+
+  if (PARTY_EMPTY_REGENERATION_ENABLED && runtimeState.wasOccupied) {
+    runtimeState.wasOccupied = false;
+    runtimeState.emptySince = now;
+    runtimeState.lastResetAt = now;
+    runtimeState.resetReason = 'party-empty';
+    runtimeState.generation = Number(runtimeState.generation || 1) + 1;
+    runtimeState.runtimeSeed = makeRuntimeSeed(store, worldId, partyId, runtimeState.generation);
+    runtimeState.transientState = {
+      mobs: 'regenerated-from-seed',
+      chests: 'regenerated-from-seed'
+    };
+    resetTransientRegionStatesForParty(store, worldId, partyId, runtimeState);
+  }
+
+  return runtimeState;
 }
 
 function getActivePartyPoses(store, worldId, partyId) {
@@ -194,9 +343,11 @@ async function handleRequest(request, response) {
     sendJson(response, 200, {
       ok: true,
       service: 'encounter-progress-backend',
+      backend: BACKEND_KIND,
+      storage: STORAGE_OWNER,
       worldSeed: WORLD_SEED,
       worldConfig: WORLD_CONFIG,
-      features: ['encounter-progress', 'region-stream-state', 'party-player-poses', 'world-seed', 'world-config']
+      features: ['encounter-progress', 'region-stream-state', 'party-player-poses', 'world-seed', 'world-config', 'party-runtime-regeneration']
     });
     return;
   }
@@ -205,7 +356,7 @@ async function handleRequest(request, response) {
     const store = await ensureStore();
     sendJson(response, 200, {
       worldId: parts[1],
-      seed: Number((store.worldSeeds && store.worldSeeds[parts[1]]) || WORLD_SEED),
+      seed: getWorldSeed(store, parts[1]),
       config: WORLD_CONFIG
     });
     return;
@@ -221,20 +372,29 @@ async function handleRequest(request, response) {
     const partyId = parts[3];
 
     if (request.method === 'GET' && parts.length === 5) {
-      const store = await ensureStore();
+      const result = await mutateStore((store) => {
+        const players = getActivePartyPoses(store, worldId, partyId);
+        const runtime = refreshPartyRuntimeState(store, worldId, partyId, players);
+        return { players, runtime };
+      });
       sendJson(response, 200, {
         worldId,
         partyId,
-        players: getActivePartyPoses(store, worldId, partyId)
+        players: result.players,
+        runtime: result.runtime
       });
       return;
     }
 
     if (request.method === 'POST' && parts.length === 7 && parts[6] === 'pose') {
       const playerId = parts[5];
+      assertRequired({ worldId, partyId, playerId });
       const body = await readJson(request);
       const poseKey = getPartyPoseKey(worldId, partyId);
-      const pose = await mutateStore((store) => {
+      const result = await mutateStore((store) => {
+        const activeBefore = getActivePartyPoses(store, worldId, partyId);
+        refreshPartyRuntimeState(store, worldId, partyId, activeBefore);
+
         if (!store.playerPoses) {
           store.playerPoses = {};
         }
@@ -250,19 +410,44 @@ async function handleRequest(request, response) {
           y: Number(body.y || 0),
           z: Number(body.z || 0),
           yaw: Number(body.yaw || 0),
-          provider: body.provider || null,
-          source: body.source || 'ue-client',
+          provider: body.provider || 'NodeRest',
+          source: body.source || SOURCE_NODE_HTTP,
+          backend: BACKEND_KIND,
+          storageOwner: STORAGE_OWNER,
           updatedAt: new Date().toISOString()
         };
 
-        return store.playerPoses[poseKey][playerId];
+        const players = getActivePartyPoses(store, worldId, partyId);
+        const runtime = refreshPartyRuntimeState(store, worldId, partyId, players);
+        return { pose: store.playerPoses[poseKey][playerId], runtime };
       });
 
       sendJson(response, 200, {
         ok: true,
         requestId,
-        pose
+        pose: result.pose,
+        runtime: result.runtime
       });
+      return;
+    }
+  }
+
+  if (
+    parts.length === 5 &&
+    parts[0] === 'worlds' &&
+    parts[2] === 'parties' &&
+    parts[4] === 'runtime-state'
+  ) {
+    const worldId = parts[1];
+    const partyId = parts[3];
+    assertRequired({ worldId, partyId });
+
+    if (request.method === 'GET') {
+      const runtime = await mutateStore((store) => {
+        const players = getActivePartyPoses(store, worldId, partyId);
+        return refreshPartyRuntimeState(store, worldId, partyId, players);
+      });
+      sendJson(response, 200, runtime);
       return;
     }
   }
@@ -275,6 +460,7 @@ async function handleRequest(request, response) {
   ) {
     const worldId = parts[1];
     const regionId = parts[3];
+    assertRequired({ worldId, regionId });
     const streamKey = getRegionStreamKey(worldId, regionId);
 
     if (request.method === 'GET') {
@@ -286,7 +472,9 @@ async function handleRequest(request, response) {
         worldId,
         regionId,
         loaded: false,
-        nearbyPlayerCount: 0
+        nearbyPlayerCount: 0,
+        backend: BACKEND_KIND,
+        storageOwner: STORAGE_OWNER
       });
       return;
     }
@@ -305,7 +493,9 @@ async function handleRequest(request, response) {
           nearbyPlayerCount: Number(body.nearbyPlayerCount || 0),
           partyId: body.partyId || null,
           playerId: body.playerId || null,
-          source: body.source || 'ue-server',
+          source: body.source || SOURCE_NODE_HTTP,
+          backend: BACKEND_KIND,
+          storageOwner: STORAGE_OWNER,
           updatedAt: new Date().toISOString()
         };
 
@@ -336,22 +526,18 @@ async function handleRequest(request, response) {
       partyId: parts[5]
     };
     const playerId = parts[7];
+    assertRequired({ worldId: scope.worldId, regionId: scope.regionId, partyId: scope.partyId, playerId });
 
     if (request.method === 'GET' && parts.length === 10 && parts[9] === 'completed') {
       const store = await ensureStore();
       const scoped = getScopedProgress(store, scope, playerId);
-      sendJson(response, 200, {
-        ...scope,
-        playerId,
-        partyCompletedEncounterIds: scoped.party.completedEncounterIds,
-        playerCompletedEncounterIds: scoped.player.completedEncounterIds,
-        completions: scoped.party.completions
-      });
+      sendJson(response, 200, scopedProgressResponse(scoped, scope, playerId));
       return;
     }
 
     if (request.method === 'POST' && parts.length === 11 && parts[10] === 'completed') {
       const encounterId = parts[9];
+      assertRequired({ encounterId });
       const body = await readJson(request);
       const completed = await mutateStore((store) => completeScopedEncounter(store, scope, playerId, encounterId, body));
 
@@ -359,11 +545,8 @@ async function handleRequest(request, response) {
         ok: true,
         requestId,
         scopeKey: completed.scopeKey,
-        ...scope,
-        playerId,
         encounterId,
-        partyCompletedEncounterIds: completed.party.completedEncounterIds,
-        playerCompletedEncounterIds: completed.player.completedEncounterIds
+        ...scopedProgressResponse(completed, scope, playerId)
       });
       return;
     }
@@ -381,7 +564,9 @@ async function handleRequest(request, response) {
         ...scope,
         playerId,
         partyCompletedEncounterIds: [],
-        playerCompletedEncounterIds: []
+        playerCompletedEncounterIds: [],
+        backend: BACKEND_KIND,
+        storageOwner: STORAGE_OWNER
       });
       return;
     }
@@ -389,6 +574,7 @@ async function handleRequest(request, response) {
 
   if (parts.length >= 3 && parts[0] === 'players' && parts[2] === 'encounters') {
     const playerId = parts[1];
+    assertRequired({ playerId });
     const store = await ensureStore();
     const player = getPlayer(store, playerId);
 
@@ -423,7 +609,9 @@ async function handleRequest(request, response) {
           encounterId,
           completedAt: now,
           reward: body.reward || null,
-          source: body.source || 'ue-client'
+          source: body.source || SOURCE_NODE_HTTP,
+          backend: BACKEND_KIND,
+          storageOwner: STORAGE_OWNER
         };
 
         return completeScopedEncounter(store, scope, playerId, encounterId, body);
@@ -434,7 +622,10 @@ async function handleRequest(request, response) {
         requestId,
         playerId,
         encounterId,
-        completedEncounterIds: completed.player.completedEncounterIds
+        completedEncounterIds: completed.player.completedEncounterIds,
+        partyCompletedEncounterIds: completed.party.completedEncounterIds,
+        backend: BACKEND_KIND,
+        storageOwner: STORAGE_OWNER
       });
       return;
     }

@@ -1,0 +1,15 @@
+services:
+  encounter-backend:
+    build: .
+    environment:
+      HOST: 0.0.0.0
+      PORT: 8080
+      DATA_FILE: /data/progress.json
+      WORLD_SEED: 421337
+      WORLD_TILE_SIZE: 3900
+      WORLD_GRID_COLUMNS: 10
+      WORLD_GRID_ROWS: 8
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data:/data
